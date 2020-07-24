@@ -1,0 +1,122 @@
+//WOZ FC/OS - July 23rd 2020 - Watfly Inc.
+//Controlling Atlas from behind the green curtain
+
+#include <Wire.h> //I2C Library
+#include <PID_v1.h> //PID Library
+#include <Servo.h> //PWM/Servo Library
+#include <Adafruit_Sensor.h> //Standard blackbox adafruit sensor lib
+#include <Adafruit_BNO055.h> //BNO055 is the IMU IC
+#include <utility/imumaths.h> //this calls the vector.h library
+
+//RC Definitions:
+double throttle_input;
+
+//PID Definitions:
+//Input from IMU, Setpoint from RC
+double pitch_setpoint, pitch_input, pitch_output; //PID Pitch Var
+double yaw_setpoint, yaw_input, yaw_output; //PID Yaw Var
+double roll_setpoint, roll_input, roll_output; //PID Roll Var
+double pitch_p = 4.5, pitch_i = 0.3, pitch_d = 0.002; //Pitch PID gains
+double yaw_p = 3.8, yaw_i = 0.22, yaw_d = 0.02; //Pitch PID gains
+double roll_p = 6, roll_i = 0.12, roll_d = 0.002; //Pitch PID gains
+float pid, pwmLeft, pwmRight, error, previous_error;
+float pid_p = 0, pid_i = 0, pid_d = 0;
+PID pitch_PID(&pitch_input, &pitch_output, &pitch_setpoint, pitch_p, pitch_i, pitch_d, DIRECT); // Pitch PID
+PID yaw_PID(&yaw_input, &yaw_output, &yaw_setpoint, yaw_p, yaw_i, yaw_d, DIRECT); // Yaw PID
+PID roll_PID(&roll_input, &roll_output, &roll_setpoint, yaw_p, yaw_i, yaw_d, DIRECT); // Roll PID
+
+
+//IMU Definitions:
+Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28); //Default BNO055 address
+double pitch_att, yaw_att, roll_att;
+
+//Servo/PWM Definitions:
+Servo RFlap, LFlap, RMotor, LMotor;
+Double RFlap_output, LFlap_output, RMotor_output, LMotor_output;
+
+void setup(void)
+{
+  Serial.begin(115200);
+
+  //Servo/PWM Setup:
+  RFlap.attach(0,0,2400), LFlap.attach(1,0,2400), RMotor.attach(2), LMotor.attach(3);
+  RFlap.writeMicroseconds(1000), LFlap.writeMicroseconds(1000), RMotor.writeMicroseconds(1000), LMotor.writeMicroseconds(1000);
+
+  //PID Setup
+  pitch_PID.SetMode(AUTOMATIC), yaw_PID.SetMode(AUTOMATIC), roll_PID.SetMode(AUTOMATIC);//Turn the PIDs on
+  pitch_PID.SetOutputLimits(-1000,1000), yaw_PID.SetOutputLimits(-1000,1000), roll_PID.SetOutputLimits(-1000,1000);
+  pitch_PID.SetSampleTime(10), yaw_PID.SetSampleTime(10), roll_PID.SetSampleTime(10);
+
+  //IMU Setup
+  Serial.println("IMU Test"); Serial.println("");
+
+  /* Initialise the sensor */
+  if (!bno.begin())
+  {
+    /* There was a problem detecting the BNO055 ... check your connections */
+    Serial.print("No IMU detected");
+    while (1);
+  }
+  else { Serial.print("Test succesful")}
+
+  delay(1000); //Give time for sensor to setup
+
+}
+
+void loop(void)
+{
+
+  // IMU Elements:
+  sensors_event_t event;
+  bno.getEvent(&event);
+
+  /* Board layout:
+         +----------+
+         |         *| RST   PITCH  ROLL  HEADING
+     ADR |*        *| SCL
+     INT |*        *| SDA     ^            /->
+     PS1 |*        *| GND     |            |
+     PS0 |*        *| 3VO     Y    Z-->    \-X
+         |         *| VIN
+         +----------+
+  */
+
+  imu::Quaternion q = bno.getQuat(); //This is from Adafruit sample code
+  q.normalize();
+  float temp = q.x();  q.x() = -q.y();  q.y() = temp; //Flipping axes
+  q.z() = -q.z();
+  imu::Vector<3> euler = q.toEuler();
+  yaw_att = (-180/M_PI) * euler.x();
+  pitch_att = (-180/M_PI) * euler.y();
+  roll_att = (-180/M_PI) * euler.z();
+
+  Serial.print(F("Orientation: "));
+  Serial.print(F("Yaw: "));
+  Serial.print(yaw_att); // heading, nose-right is positive, z-axis points up
+  Serial.print(F("  Pitch: "));
+  Serial.print(pitch_att); // roll, rightwing-up is positive, y-axis points forward
+  Serial.print(F("  Roll: "));
+  Serial.print(roll_att); // pitch, nose-down is positive, x-axis points right
+  Serial.println(F(""));
+
+  //PID elements:
+  pitch_setpoint = 0; // DELETE
+  pitch_input = pitch_att, yaw_input = yaw_att, roll_input = roll_att;
+  pitch_PID.Compute(), yaw_PID.Compute(), roll_PID.compute();
+//  Serial.print("Pitch: "), Serial.print(pitch_att);
+//  Serial.print(" | Pitch Output: "), Serial.println(pitch_output);
+
+  //Mixer / Mixing:
+  //In PX4, roll, pitch and yaw inputs are expected to range from -1.0 to 1.0
+  //While thrust input ranges from 0.0 to 1.0
+  RFLap_output = ( (yaw_setpoint * -1 + 0) * 0.75 + (pitch_setpoint * 1 + 0) * 0.75)* 1 + 0;
+  LFlap_output = ( (yaw_setpoint * -1 + 0) * 0.75 + (pitch_setpoint * -1 + 0) * 0.75)* 1+ 0;
+  RMotor_output = ( (roll_setpoint * 1) + (pitch_setpoint * 0) + (yaw_setpoint * 0 ) + (throttle_setpoint * 1));
+  LMotor_output = ( (roll_setpoint * -1) + (pitch_setpoint * 0) + (yaw_setpoint * 0 ) + (throttle_setpoint * 1));
+//  Serial.print("Pitch: "), Serial.print(pitch_att);
+//  Serial.print(" | RMotor: "), Serial.print(throttle + pitch_output);
+//  Serial.print(" | LMotor: "), Serial.println(throttle - pitch_output);
+
+
+  delay(1); //BNO055 100Hz
+}
